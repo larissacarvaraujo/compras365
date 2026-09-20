@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <linearGradient id="brandGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2563eb"/>
+      <stop offset="100%" stop-color="#1d4ed8"/>
+    </linearGradient>
+    <linearGradient id="accentGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#059669"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="128" fill="url(#brandGrad)"/>
+  <!-- Shopping Cart Box -->
+  <path d="M140 180h232l-28 130H176L140 180z" fill="white" fill-opacity="0.95"/>
+  <circle cx="200" cy="360" r="28" fill="white"/>
+  <circle cx="320" cy="360" r="28" fill="white"/>
+  <!-- Checkmark Badge on Top Right -->
+  <circle cx="370" cy="145" r="55" fill="url(#accentGrad)" stroke="white" stroke-width="8"/>
+  <path d="M346 145l16 16 32-34" stroke="white" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- 365 text subtle baseline -->
+  <text x="256" y="265" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-weight="900" font-size="52" fill="#1e3a8a">365</text>
+</svg>

@@ -1,0 +1,224 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net: Default-deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ----------------------------------------------------
+    // HELPER FUNCTIONS (Attribute-Based Access Control)
+    // ----------------------------------------------------
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128;
+    }
+
+    // Fetch user profile from database
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function userExists() {
+      return exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    // Checks if the user is an active, approved user
+    function isApprovedUser() {
+      return isSignedIn() && userExists() && getUserData().status == 'approved';
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        (userExists() && getUserData().role == 'admin' && getUserData().status == 'approved') ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isBuyer() {
+      return isApprovedUser() && (getUserData().role == 'buyer' || isAdmin());
+    }
+
+    function isApprover() {
+      return isApprovedUser() && (getUserData().role == 'approver' || isAdmin());
+    }
+
+    function isStockManager() {
+      return isApprovedUser() && (getUserData().role == 'stock_manager' || isAdmin());
+    }
+
+    // ----------------------------------------------------
+    // USERS COLLECTION
+    // Fixes privilege escalation: No self-assignment of 'admin'
+    // Non-admin can NEVER modify 'role', 'status' or 'approvalLimit'
+    // ----------------------------------------------------
+    match /users/{userId} {
+      allow get: if isSignedIn();
+      allow list: if isAdmin() || (isSignedIn() && userId == request.auth.uid);
+
+      // Self-registration is restricted: initial role must be collaborator or pending
+      allow create: if isSignedIn() && isValidId(userId) && (
+        isAdmin() ||
+        (
+          isOwner(userId) &&
+          incoming().role == 'collaborator' &&
+          incoming().status in ['pending', 'approved'] &&
+          incoming().email == request.auth.token.email &&
+          (!('approvalLimit' in incoming().keys()) || incoming().approvalLimit == 0)
+        )
+      );
+
+      // Updates: only admin can alter roles/status/limits. Users can only update their personal profile info
+      allow update: if isSignedIn() && isValidId(userId) && (
+        isAdmin() ||
+        (
+          isOwner(userId) &&
+          incoming().role == existing().role &&
+          incoming().status == existing().status &&
+          incoming().email == existing().email &&
+          (!('approvalLimit' in incoming().keys()) || incoming().approvalLimit == existing().approvalLimit) &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'department', 'phone', 'updatedAt'])
+        )
+      );
+
+      allow delete: if isAdmin();
+    }
+
+    // ----------------------------------------------------
+    // PURCHASE REQUESTS COLLECTION
+    // Separated entity. Collaborator can create and view. Buyer/Approver/Admin manage.
+    // ----------------------------------------------------
+    match /requests/{requestId} {
+      allow get: if isApprovedUser();
+      allow list: if isApprovedUser();
+
+      allow create: if isApprovedUser() && isValidId(requestId) &&
+        incoming().requesterId == request.auth.uid &&
+        incoming().status in ['draft', 'pending_quote'];
+
+      allow update: if isApprovedUser() && isValidId(requestId) && (
+        isAdmin() ||
+        isBuyer() ||
+        isApprover() ||
+        (
+          existing().requesterId == request.auth.uid &&
+          existing().status in ['draft', 'pending_quote'] &&
+          incoming().requesterId == existing().requesterId
+        )
+      );
+
+      allow delete: if isAdmin() || (
+        isApprovedUser() &&
+        existing().requesterId == request.auth.uid &&
+        existing().status == 'draft'
+      );
+    }
+
+    // ----------------------------------------------------
+    // COMPARATIVE QUOTES COLLECTION
+    // Separated entity. Managed by Buyers and Approvers
+    // ----------------------------------------------------
+    match /quotes/{quoteId} {
+      allow get: if isApprovedUser();
+      allow list: if isApprovedUser();
+
+      allow create: if isBuyer() && isValidId(quoteId);
+      allow update: if (isBuyer() || isApprover() || isAdmin()) && isValidId(quoteId);
+      allow delete: if isAdmin();
+    }
+
+    // ----------------------------------------------------
+    // PURCHASE ORDERS (PO) COLLECTION
+    // Sequential numbering, formal PO emission
+    // ----------------------------------------------------
+    match /orders/{orderId} {
+      allow get: if isApprovedUser();
+      allow list: if isApprovedUser();
+
+      allow create: if isBuyer() && isValidId(orderId);
+      allow update: if (isBuyer() || isStockManager() || isAdmin()) && isValidId(orderId);
+      allow delete: if isAdmin();
+    }
+
+    // ----------------------------------------------------
+    // STOCK & INVENTORY COLLECTION
+    // Almoxarifado with minimum stock alerts
+    // ----------------------------------------------------
+    match /stock/{itemId} {
+      allow get: if isApprovedUser();
+      allow list: if isApprovedUser();
+
+      allow create, update: if (isStockManager() || isBuyer() || isAdmin()) && isValidId(itemId);
+      allow delete: if isAdmin();
+    }
+
+    // ----------------------------------------------------
+    // STOCK MOVEMENTS (IN / OUT)
+    // Physical & fiscal receipt entry / department dispatch
+    // ----------------------------------------------------
+    match /stock_movements/{movementId} {
+      allow get: if isApprovedUser();
+      allow list: if isApprovedUser();
+
+      // Only stock manager or admin can register stock movements, must record their own UID
+      allow create: if (isStockManager() || isAdmin()) && isValidId(movementId) &&
+        incoming().performedBy == request.auth.uid;
+
+      // Stock movements are immutable financial/inventory facts
+      allow update: if false;
+      allow delete: if isAdmin();
+    }
+
+    // ----------------------------------------------------
+    // SUPPLIERS
+    // ----------------------------------------------------
+    match /suppliers/{supplierId} {
+      allow get: if isApprovedUser();
+      allow list: if isApprovedUser();
+
+      allow create, update: if (isBuyer() || isAdmin()) && isValidId(supplierId);
+      allow delete: if isAdmin();
+    }
+
+    // ----------------------------------------------------
+    // AUDIT LOGS (Append-Only, Anti-Tamper)
+    // Logs cannot be edited or spoofed. userId & email must match auth
+    // ----------------------------------------------------
+    match /audit_logs/{logId} {
+      allow get: if isAdmin() || isApprover();
+      allow list: if isAdmin() || isApprover();
+
+      // Anyone approved can append their real log, but can never fake credentials
+      allow create: if isSignedIn() && isValidId(logId) &&
+        incoming().userId == request.auth.uid &&
+        incoming().userEmail == request.auth.token.email;
+
+      // STRICTLY IMMUTABLE: cannot be updated or deleted by anyone
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    // System configuration & approval rules
+    match /settings/{docId} {
+      allow read: if isApprovedUser();
+      allow write: if isAdmin();
+    }
+  }
+}

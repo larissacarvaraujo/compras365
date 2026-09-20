@@ -1,0 +1,6 @@
+{
+  "name": "Compras365",
+  "description": "Sistema Integrado de Gestão de Compras, Cotações Comparativas, Pedidos, Alçadas de Aprovação e Almoxarifado",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

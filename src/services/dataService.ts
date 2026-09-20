@@ -27,6 +27,7 @@ interface DatabaseState {
   suppliers: Supplier[];
   auditLogs: AuditLog[];
   approvalRules: ApprovalRule[];
+  categories: string[];
 }
 
 const INITIAL_USERS: User[] = [
@@ -185,6 +186,21 @@ const INITIAL_SUPPLIERS: Supplier[] = [
     paymentTermsDefault: '30 dias',
     createdAt: '2026-02-01T10:00:00Z',
   },
+];
+
+const INITIAL_STOCK_CATEGORIES: string[] = [
+  'TI & Infra',
+  'Elétrica & Iluminação',
+  'Hidráulica',
+  'EPIs & Segurança',
+  'Escritório & Papelaria',
+  'Limpeza & Higiene',
+  'Manutenção & Ferramentas',
+  'Matéria-Prima',
+  'Embalagens',
+  'Peças Automotivas',
+  'Mobiliário',
+  'Geral',
 ];
 
 const INITIAL_STOCK: StockItem[] = [
@@ -894,6 +910,10 @@ class DataService {
               }
             });
           }
+          if (!parsed.categories || !Array.isArray(parsed.categories) || parsed.categories.length === 0) {
+            const fromStock = (parsed.stock || []).map((s: StockItem) => s.category).filter(Boolean);
+            parsed.categories = Array.from(new Set([...INITIAL_STOCK_CATEGORIES, ...fromStock]));
+          }
           return parsed;
         }
       }
@@ -912,6 +932,7 @@ class DataService {
       suppliers: INITIAL_SUPPLIERS,
       auditLogs: INITIAL_AUDIT_LOGS,
       approvalRules: INITIAL_APPROVAL_RULES,
+      categories: Array.from(new Set([...INITIAL_STOCK_CATEGORIES, ...INITIAL_STOCK.map((s) => s.category)])),
     };
     this.saveState(defaultState);
     return defaultState;
@@ -1505,6 +1526,305 @@ class DataService {
   // Stock
   public getStock(): StockItem[] {
     return [...this.state.stock];
+  }
+
+  public addStockItem(data: {
+    code?: string;
+    description: string;
+    category: string;
+    unit: string;
+    currentStock: number;
+    minStock: number;
+    maxStock: number;
+    averageCost?: number;
+    location: string;
+  }): StockItem {
+    const user = this.state.currentUser;
+    const now = new Date().toISOString();
+    const count = this.state.stock.length + 1;
+    const code = data.code?.trim() || `MAT-${String(count).padStart(3, '0')}`;
+    const desc = data.description.trim();
+
+    const cat = data.category?.trim() || 'Geral';
+    if (!this.state.categories.some((c) => c.toLowerCase() === cat.toLowerCase())) {
+      this.state.categories.push(cat);
+    }
+
+    const newItem: StockItem = {
+      id: 'stk-' + Date.now() + '-' + Math.random().toString(36).substring(2, 6),
+      code,
+      sku: code,
+      name: desc,
+      description: desc,
+      category: cat,
+      unit: data.unit.trim().toUpperCase() || 'UN',
+      currentStock: Number(data.currentStock) || 0,
+      minStock: Number(data.minStock) || 0,
+      maxStock: Number(data.maxStock) || Math.max((Number(data.minStock) || 0) * 3, 10),
+      averageCost: Number(data.averageCost) || 0,
+      avgCost: Number(data.averageCost) || 0,
+      location: data.location.trim() || 'Almoxarifado Central',
+      lastRestockDate: Number(data.currentStock) > 0 ? now.split('T')[0] : undefined,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    this.state.stock.unshift(newItem);
+
+    // If initial stock > 0, record initial stock movement
+    if (newItem.currentStock > 0) {
+      const initMovement: StockMovement = {
+        id: 'mov-init-' + Date.now(),
+        itemId: newItem.id,
+        stockItemId: newItem.id,
+        itemCode: newItem.code,
+        description: newItem.description,
+        itemName: newItem.name,
+        type: 'entry',
+        quantity: newItem.currentStock,
+        previousStock: 0,
+        newStock: newItem.currentStock,
+        referenceType: 'inventory_count',
+        userId: user.userId,
+        userName: user.displayName,
+        performedBy: user.userId,
+        performedByName: user.displayName,
+        reason: 'Implantação de saldo inicial de estoque',
+        department: 'Almoxarifado Central',
+        notes: `Cadastro inicial do material por ${user.displayName}`,
+        createdAt: now,
+      };
+      this.state.stockMovements.unshift(initMovement);
+    }
+
+    this.appendAudit(
+      'ITEM_ESTOQUE_CADASTRADO',
+      'StockItem',
+      newItem.id,
+      `Novo material "${newItem.description}" (${newItem.code}) cadastrado no almoxarifado por ${user.displayName}. Saldo inicial: ${newItem.currentStock} ${newItem.unit}.`
+    );
+    this.notify();
+    return newItem;
+  }
+
+  public updateStockItem(id: string, data: Partial<StockItem>): StockItem {
+    const user = this.state.currentUser;
+    const item = this.state.stock.find((s) => s.id === id);
+    if (!item) throw new Error('Item de estoque não encontrado para atualização.');
+
+    const prevStock = item.currentStock;
+    const now = new Date().toISOString();
+
+    if (data.code) {
+      item.code = data.code.trim();
+      item.sku = item.code;
+    }
+    if (data.description || data.name) {
+      const desc = (data.description || data.name)!.trim();
+      item.description = desc;
+      item.name = desc;
+    }
+    if (data.category) {
+      const cat = data.category.trim();
+      item.category = cat;
+      if (!this.state.categories.some((c) => c.toLowerCase() === cat.toLowerCase())) {
+        this.state.categories.push(cat);
+      }
+    }
+    if (data.unit) item.unit = data.unit.trim().toUpperCase();
+    if (data.location) item.location = data.location.trim();
+    if (data.minStock !== undefined) item.minStock = Number(data.minStock);
+    if (data.maxStock !== undefined) item.maxStock = Number(data.maxStock);
+    if (data.averageCost !== undefined) {
+      item.averageCost = Number(data.averageCost);
+      item.avgCost = Number(data.averageCost);
+    }
+
+    // If currentStock was modified directly in edit modal, register an adjustment movement
+    if (data.currentStock !== undefined && Number(data.currentStock) !== prevStock) {
+      const newStock = Number(data.currentStock);
+      const diff = newStock - prevStock;
+      item.currentStock = newStock;
+
+      const adjMovement: StockMovement = {
+        id: 'mov-adj-' + Date.now(),
+        itemId: item.id,
+        stockItemId: item.id,
+        itemCode: item.code || item.sku || '',
+        description: item.description || item.name || '',
+        itemName: item.name || item.description || '',
+        type: 'adjustment',
+        quantity: Math.abs(diff),
+        previousStock: prevStock,
+        newStock: newStock,
+        referenceType: 'inventory_count',
+        userId: user.userId,
+        userName: user.displayName,
+        performedBy: user.userId,
+        performedByName: user.displayName,
+        reason: `Ajuste cadastral de saldo (${diff > 0 ? '+' : ''}${diff} ${item.unit})`,
+        department: 'Almoxarifado Central',
+        notes: `Atualização de dados cadastrais por ${user.displayName}`,
+        createdAt: now,
+      };
+      this.state.stockMovements.unshift(adjMovement);
+    }
+
+    item.updatedAt = now;
+
+    this.appendAudit(
+      'ITEM_ESTOQUE_ATUALIZADO',
+      'StockItem',
+      item.id,
+      `Material "${item.description}" (${item.code}) atualizado no almoxarifado por ${user.displayName}.`
+    );
+    this.notify();
+    return item;
+  }
+
+  public deleteStockItem(id: string): void {
+    const user = this.state.currentUser;
+    const index = this.state.stock.findIndex((s) => s.id === id);
+    if (index === -1) throw new Error('Item de estoque não encontrado para exclusão.');
+
+    const removed = this.state.stock[index];
+    this.state.stock.splice(index, 1);
+
+    this.appendAudit(
+      'ITEM_ESTOQUE_EXCLUIDO',
+      'StockItem',
+      id,
+      `Material "${removed.description || removed.name}" (${removed.code || removed.sku}) foi excluído do almoxarifado por ${user.displayName}. Saldo na exclusão: ${removed.currentStock} ${removed.unit}.`
+    );
+    this.notify();
+  }
+
+  // Stock Categories Management
+  public getCategories(): string[] {
+    const list = this.state.categories || [];
+    // Ensure all categories in current stock are present
+    const fromStock = this.state.stock.map((s) => s.category).filter(Boolean);
+    const combined = Array.from(new Set([...list, ...fromStock])).filter(Boolean);
+    return combined.sort((a, b) => a.localeCompare(b, 'pt-BR'));
+  }
+
+  public addCategory(categoryName: string): string {
+    const trimmed = categoryName.trim();
+    if (!trimmed) throw new Error('O nome da categoria não pode ser vazio.');
+    
+    if (!this.state.categories) {
+      this.state.categories = [];
+    }
+
+    const existing = this.state.categories.find(
+      (c) => c.toLowerCase() === trimmed.toLowerCase()
+    );
+    if (existing) {
+      return existing;
+    }
+
+    this.state.categories.push(trimmed);
+    const user = this.state.currentUser;
+    this.appendAudit(
+      'CATEGORIA_ESTOQUE_CRIADA',
+      'StockCategory',
+      trimmed,
+      `Nova categoria "${trimmed}" adicionada ao almoxarifado por ${user.displayName}.`
+    );
+    this.notify();
+    return trimmed;
+  }
+
+  public updateStockItemCategory(stockItemId: string, newCategory: string): StockItem {
+    const user = this.state.currentUser;
+    const item = this.state.stock.find((s) => s.id === stockItemId);
+    if (!item) throw new Error('Item de estoque não encontrado.');
+
+    const cleanCategory = newCategory.trim() || 'Geral';
+    const prevCategory = item.category;
+
+    if (!this.state.categories) {
+      this.state.categories = [];
+    }
+    if (!this.state.categories.some((c) => c.toLowerCase() === cleanCategory.toLowerCase())) {
+      this.state.categories.push(cleanCategory);
+    }
+
+    item.category = cleanCategory;
+    item.updatedAt = new Date().toISOString();
+
+    this.appendAudit(
+      'CATEGORIA_ITEM_ATUALIZADA',
+      'StockItem',
+      item.id,
+      `Categoria do item "${item.description || item.name}" alterada de "${prevCategory}" para "${cleanCategory}" por ${user.displayName}.`
+    );
+    this.notify();
+    return item;
+  }
+
+  public renameCategory(oldName: string, newName: string): void {
+    const user = this.state.currentUser;
+    const cleanOld = oldName.trim();
+    const cleanNew = newName.trim();
+    if (!cleanNew) throw new Error('O novo nome da categoria não pode ser vazio.');
+    if (cleanOld.toLowerCase() === cleanNew.toLowerCase()) return;
+
+    if (!this.state.categories) this.state.categories = [];
+
+    // Replace in categories list
+    const index = this.state.categories.findIndex((c) => c.toLowerCase() === cleanOld.toLowerCase());
+    if (index !== -1) {
+      this.state.categories[index] = cleanNew;
+    } else {
+      this.state.categories.push(cleanNew);
+    }
+
+    // Update all stock items with this category
+    let count = 0;
+    this.state.stock.forEach((item) => {
+      if (item.category.toLowerCase() === cleanOld.toLowerCase()) {
+        item.category = cleanNew;
+        item.updatedAt = new Date().toISOString();
+        count++;
+      }
+    });
+
+    this.appendAudit(
+      'CATEGORIA_ESTOQUE_RENOMEADA',
+      'StockCategory',
+      cleanNew,
+      `Categoria "${cleanOld}" renomeada para "${cleanNew}" por ${user.displayName} (${count} materiais atualizados).`
+    );
+    this.notify();
+  }
+
+  public deleteCategory(categoryName: string): void {
+    const user = this.state.currentUser;
+    const cleanName = categoryName.trim();
+    if (!this.state.categories) return;
+
+    this.state.categories = this.state.categories.filter(
+      (c) => c.toLowerCase() !== cleanName.toLowerCase()
+    );
+
+    // Reassign items with this category to 'Geral'
+    let count = 0;
+    this.state.stock.forEach((item) => {
+      if (item.category.toLowerCase() === cleanName.toLowerCase()) {
+        item.category = 'Geral';
+        item.updatedAt = new Date().toISOString();
+        count++;
+      }
+    });
+
+    this.appendAudit(
+      'CATEGORIA_ESTOQUE_EXCLUIDA',
+      'StockCategory',
+      cleanName,
+      `Categoria "${cleanName}" removida por ${user.displayName} (${count} materiais reclassificados para "Geral").`
+    );
+    this.notify();
   }
 
   public getStockMovements(): StockMovement[] {
